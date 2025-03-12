@@ -161,7 +161,7 @@ def upload_image(request):
 
     return JsonResponse({'error': 'No image uploaded'}, status=400)
 
-@method_decorator(csrf_exempt, name='dispatch')  # XXE vulnerability left intentionally
+@method_decorator(csrf_exempt, name='dispatch')
 class SubmitShopApplication(APIView):
     """
     Handles the submission of shop applications with vulnerable XML parsing (XXE).
@@ -169,60 +169,86 @@ class SubmitShopApplication(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        xml_data = request.body#.decode("utf-8")
+        xml_data = request.body.decode("utf-8")  # Decode bytes to string
 
         try:
-            # ⚠️ **This is where XXE vulnerability is introduced**
-            parser = etree.XMLParser(resolve_entities=True)  # Enables XXE
+            # ⚠️ XXE Vulnerability: Enabling entity expansion
+            parser = etree.XMLParser(resolve_entities=True)  # XXE enabled
             root = etree.fromstring(xml_data, parser=parser)
 
-            # Extract shop data
-            shop_data = {
-                "user": request.user,
-                "shop_name": root.get("shopName"),
-                "selected_country": root.get("selectedCountry"),
-                "selected_language": root.get("selectedLanguage"),
-                "selected_currency": root.get("selectedCurrency"),
-                "bank_name": root.get("bankName"),
-                "iban": root.get("iban"),  # XXE Exploit Happens Here
-                "swift_bic": root.get("swiftBic"),
-                "bank_location": root.get("bankLocation"),
-                "business_name": root.get("businessName"),
-                "tax_id": root.get("taxId"),
-                "billing_address": root.get("billingAddress"),
-                "billing_country": root.get("billingCountry"),
-                "is_active": False  # Shop is created but inactive
-            }
+            # Extract shop data from XML elements (XXE will be reflected if injected)
+            shop_name = root.find("shopName").text if root.find("shopName") is not None else "Unnamed Shop"
+            selected_country = root.find("selectedCountry").text if root.find("selectedCountry") is not None else ""
+            selected_language = root.find("selectedLanguage").text if root.find("selectedLanguage") is not None else ""
+            selected_currency = root.find("selectedCurrency").text if root.find("selectedCurrency") is not None else ""
+            bank_name = root.find("bankName").text if root.find("bankName") is not None else ""
+            iban = root.find("iban").text if root.find("iban") is not None else ""
+            swift_bic = root.find("swiftBic").text if root.find("swiftBic") is not None else ""
+            bank_location = root.find("bankLocation").text if root.find("bankLocation") is not None else ""
+            business_name = root.find("businessName").text if root.find("businessName") is not None else ""
+            tax_id = root.find("taxId").text if root.find("taxId") is not None else ""
+            billing_address = root.find("billingAddress").text if root.find("billingAddress") is not None else ""
+            billing_country = root.find("billingCountry").text if root.find("billingCountry") is not None else ""
 
-            # Create the Shop (inactive)
-            shop = Shop.objects.create(**shop_data)
+            # Create the shop (XXE payload inside shop_name will be stored)
+            shop = Shop.objects.create(
+                user=request.user,
+                shop_name=shop_name,  # ⚠️ This may contain XXE output
+                selected_country=selected_country,
+                selected_language=selected_language,
+                selected_currency=selected_currency,
+                bank_name=bank_name,
+                iban=iban,
+                swift_bic=swift_bic,
+                bank_location=bank_location,
+                business_name=business_name,
+                tax_id=tax_id,
+                billing_address=billing_address,
+                billing_country=billing_country,
+                is_active=False
+            )
 
-            # Extract and store products
+            # Process Products
             products_xml = root.find("Products")
             if products_xml is not None:
                 for product in products_xml.findall("Product"):
-                    category_name = product.find("category").text
+                    title = product.find("title").text if product.find("title") is not None else "Unnamed Product"
+                    description = product.find("description").text if product.find("description") is not None else ""
+                    category_name = product.find("category").text if product.find("category") is not None else "Uncategorized"
+                    price = product.find("price").text if product.find("price") is not None else "0.00"
+                    quantity = product.find("quantity").text if product.find("quantity") is not None else "1"
+                    image_url = product.find("image").text if product.find("image") is not None else ""
+
+                    # Create or get category
                     category, _ = Category.objects.get_or_create(name=category_name)
 
+                    # Create product in the database
                     Product.objects.create(
                         shop=shop,
-                        name=product.find("title").text,
-                        description=product.find("description").text,
-                        price=product.find("price").text,
-                        stock=int(product.find("quantity").text),
+                        name=title,
+                        description=description,
+                        price=price,
+                        stock=int(quantity),
                         category=category,
-                        is_active=False  # Product is inactive until shop approval
+                        is_active=False,  # Products are inactive until shop is approved
                     )
 
-            # Save raw XML in approval request (Vulnerable)
+            # Store raw XML to simulate realistic XXE attack processing
             approval = ShopApproval.objects.create(shop=shop, products_xml=xml_data)
 
             return JsonResponse(
-                {"message": "Shop application submitted successfully.", "shop_id": shop.id, "approval_id": approval.id}
+                {
+                    "message": "Your shop was created and is waiting for approval.",
+                    "shop_id": shop.id,
+                    "shop_name": shop.shop_name  # ⚠️ If XXE exploited, output appears here
+                }
             )
 
         except Exception as e:
             return JsonResponse({"error": "Invalid XML format", "details": str(e)}, status=400)
+
+
+
 
 @method_decorator(login_required, name='dispatch')
 class ApproveShop(APIView):
