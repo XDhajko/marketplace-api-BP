@@ -3,7 +3,8 @@ import base64
 from django.contrib.auth import authenticate, get_user_model
 from django.core.files.base import ContentFile
 from rest_framework import serializers
-from .models import Product, Customer, Order, OrderItem, Category, Shop
+from .models import Product, Order, OrderItem, Category, Shop, ShopReview, CartItem, Cart, Favorite, \
+    ShippingConfirmation
 
 User = get_user_model()
 
@@ -26,8 +27,18 @@ class CategorySerializer(serializers.ModelSerializer):
 # -----------------------
 # Product Serializer
 # -----------------------
+
+class ProductCardSerializer(serializers.ModelSerializer):
+    image = serializers.ImageField(required=False)
+    class Meta:
+        model = Product
+        fields = '__all__'
+
+
 class ProductSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source="category.name", read_only=True)
     image = serializers.ImageField(required= False)
+    shop_products = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -41,39 +52,80 @@ class ProductSerializer(serializers.ModelSerializer):
             data["image"] = ContentFile(base64.b64decode(imgstr), name=f"upload.{ext}")
         return super().to_internal_value(data)
 
+    def get_shop_products(self, obj):
+        if not obj.shop:
+            return []  # No shop → no related products
 
-# -----------------------
-# Customer Serializer
-# -----------------------
-class CustomerSerializer(serializers.ModelSerializer):
-    user = UserSerializer(read_only=True)
+        other_products = obj.shop.products.exclude(id=obj.id)[:5]
+        return ProductCardSerializer(other_products, many=True).data
 
-    class Meta:
-        model = Customer
-        fields = '__all__'
-
-
-# -----------------------
-# Order Item Serializer (Nested Inside Order)
-# -----------------------
+# Used to display each order item
 class OrderItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True)
     product = ProductSerializer(read_only=True)
 
     class Meta:
         model = OrderItem
-        fields = '__all__'
+        fields = ['id', 'product', 'product_name', 'quantity', 'price', 'created_at']
 
 
-# -----------------------
-# Order Serializer
-# -----------------------
+class ShippingConfirmationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShippingConfirmation
+        fields = "__all__"
+        read_only_fields = ["order", "shop"]
+
+
 class OrderSerializer(serializers.ModelSerializer):
-    customer = CustomerSerializer(read_only=True)
+    user = serializers.StringRelatedField(read_only=True)
     items = OrderItemSerializer(many=True, read_only=True)
+    shipping_confirmation = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = '__all__'
+
+    def get_shipping_confirmation(self, obj):
+        request = self.context.get('request')
+        if not request or not hasattr(request.user, 'shop'):
+            return None
+
+        shop = request.user.shop
+        confirmation = obj.shipping_confirmations.filter(shop=shop).first()
+        if confirmation:
+            return ShippingConfirmationSerializer(confirmation).data
+        return None
+
+    def update(self, instance, validated_data):
+        # Only allow status updates through PATCH
+        status = validated_data.get('status', None)
+        if status:
+            instance.status = status
+            instance.save()
+        return instance
+
+
+# Minimal serializer to receive items from frontend
+class SimpleOrderItemSerializer(serializers.Serializer):
+    product = serializers.IntegerField()
+    quantity = serializers.IntegerField(min_value=1)
+
+
+# For creating a new order from checkout
+class OrderCreateSerializer(serializers.Serializer):
+    items = SimpleOrderItemSerializer(many=True)
+    shipping_address = serializers.CharField(required=True)
+    shipping_city = serializers.CharField(required=True)
+    shipping_country = serializers.CharField(required=True)
+    shipping_postal_code = serializers.CharField(required=True)
+    full_name = serializers.CharField(required=True)
+    phone_number = serializers.CharField(required=False, allow_blank=True)
+    payment_method = serializers.CharField(required=True)
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("At least one item is required.")
+        return value
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -134,6 +186,62 @@ class LoginSerializer(serializers.Serializer):
 
 
 class ShopSerializer(serializers.ModelSerializer):
+    approval_status = serializers.SerializerMethodField()
+
     class Meta:
         model = Shop
         fields = '__all__'
+
+    def get_approval_status(self, obj):
+        try:
+            return obj.approval_request.status
+        except:
+            return None
+
+
+class ShopReviewSerializer(serializers.ModelSerializer):
+    user = serializers.StringRelatedField(read_only=True)  # Returns username
+    shop = serializers.PrimaryKeyRelatedField(read_only=True)  # No need to send `shop` in the request
+
+    class Meta:
+        model = ShopReview
+        fields = ["id", "shop", "user", "rating", "text", "created_at"]
+        read_only_fields = ["user", "shop", "created_at"]
+
+class CartItemSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)
+    product_discount = serializers.DecimalField(source='product.discount', max_digits=4, decimal_places=2, read_only=True)
+    product_image = serializers.ImageField(source='product.image', read_only=True)
+    shop_id = serializers.IntegerField(source='product.shop.id', read_only=True)
+    shop_name = serializers.CharField(source='product.shop.shop_name', read_only=True)
+    category = serializers.CharField(source='product.category.name', read_only=True)
+
+    class Meta:
+        model = CartItem
+        fields = ['id', 'product', 'quantity', 'product_name', 'product_price', 'product_discount', 'product_image', 'shop_id', 'shop_name', 'category']
+
+
+class CartSerializer(serializers.ModelSerializer):
+    items = CartItemSerializer(many=True)
+
+    class Meta:
+        model = Cart
+        fields = ['id', 'user', 'created_at', 'items']
+
+
+class AddToCartSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+    quantity = serializers.IntegerField(min_value=1, default=1)
+
+class FavoriteSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_image = serializers.ImageField(source='product.image', read_only=True)
+    product_price = serializers.DecimalField(source='product.price', max_digits=10, decimal_places=2, read_only=True)
+    product_discount = serializers.DecimalField(source='product.discount', max_digits=3, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = Favorite
+        fields = ['id', 'product', 'product_name', 'product_image', 'product_price', 'product_discount']
+
+

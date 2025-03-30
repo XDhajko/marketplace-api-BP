@@ -2,6 +2,7 @@ import os
 from io import BytesIO
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
+from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 
 from PIL import Image
@@ -42,7 +43,7 @@ class Shop(models.Model):
     """
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     shop_name = models.CharField(max_length=255)
-    profile_picture = models.ImageField(upload_to="shop_pictures/", null=True, blank=True)
+    profile_picture = models.ImageField(upload_to="profile_pictures/", null=True, blank=True)
     selected_country = models.CharField(max_length=100)
     selected_language = models.CharField(max_length=50)
     selected_currency = models.CharField(max_length=10)
@@ -54,7 +55,7 @@ class Shop(models.Model):
     tax_id = models.CharField(max_length=100)
     billing_address = models.TextField()
     billing_country = models.CharField(max_length=100)
-    is_active = models.BooleanField(default=False)  # Deactivated until approval
+    is_active = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -140,28 +141,11 @@ class Product(models.Model):
 
         super().save(*args, **kwargs)
 
-
-# -----------------------
-# Customer Model
-# -----------------------
-class Customer(models.Model):
-    """
-    Represents a customer who can place orders.
-    """
-    user = models.OneToOneField(User, on_delete=models.CASCADE)
-    address = models.TextField()
-    phone = models.CharField(max_length=20, blank=True, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-
 # -----------------------
 # Order & Order Items
 # -----------------------
 class Order(models.Model):
-    """
-    Represents an order placed by a customer.
-    """
-    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='orders')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='orders')
     total_price = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(
         max_length=15,
@@ -169,10 +153,23 @@ class Order(models.Model):
                  ('cancelled', 'Cancelled')],
         default='pending'
     )
+
+    # ✅ Shipping Info
+    full_name = models.CharField(max_length=100)
+    shipping_address = models.CharField(max_length=255)
+    shipping_city = models.CharField(max_length=100)
+    shipping_postal_code = models.CharField(max_length=20)
+    shipping_country = models.CharField(max_length=50)
+    phone_number = models.CharField(max_length=20, blank=True, null=True)
+
+    # ✅ Payment Info (method name only for now)
+    payment_method = models.CharField(max_length=20)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"Order {self.id} - {self.status}"
+
 
 
 class OrderItem(models.Model):
@@ -188,3 +185,67 @@ class OrderItem(models.Model):
     def __str__(self):
         return f"{self.quantity} x {self.product.name} in Order {self.order.id}"
 
+class ShopReview(models.Model):
+    """
+    Represents a review for a shop by a customer.
+    """
+    shop = models.ForeignKey("Shop", on_delete=models.CASCADE, related_name="reviews")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="shop_reviews")
+    rating = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(5.0)]
+    )  # Float rating from 0.0 to 5.0
+    text = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]  # Show latest reviews first
+        unique_together = ("shop", "user")  # Ensures one review per user per shop
+
+    def __str__(self):
+        return f"Review by {self.user.username} for {self.shop.shop_name} ({self.rating}★)"
+
+
+class Cart(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='cart')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Cart ({self.user.username})"
+
+
+class CartItem(models.Model):
+    cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    quantity = models.PositiveIntegerField(default=1)
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('cart', 'product')
+
+    def __str__(self):
+        return f"{self.quantity} x {self.product.name}"
+
+class Favorite(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="favorites")
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="favorited_by")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("user", "product")
+
+    def __str__(self):
+        return f"{self.user.username} likes {self.product.name}"
+
+
+class ShippingConfirmation(models.Model):
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="shipping_confirmations")
+    shop = models.ForeignKey("Shop", on_delete=models.CASCADE)
+    carrier = models.CharField(max_length=100)
+    tracking_number = models.CharField(max_length=100)
+    shipped_at = models.DateTimeField()
+
+    class Meta:
+        unique_together = ("order", "shop")  # prevent duplicate confirmations for the same shop-order pair
+
+    def __str__(self):
+        return f"{self.order.id} - {self.shop.shop_name} → {self.tracking_number}"

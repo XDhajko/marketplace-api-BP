@@ -1,4 +1,13 @@
 import os
+import subprocess
+import tempfile
+from datetime import datetime
+from PIL import Image
+import platform
+from io import BytesIO
+from pathlib import Path
+
+from drf_spectacular.openapi import AutoSchema
 from rest_framework.authtoken.models import Token
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import update_last_login
@@ -9,22 +18,25 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import viewsets, status
 from rest_framework.response import Response
-from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.decorators import action, api_view, permission_classes, schema
+from rest_framework.permissions import IsAuthenticated, AllowAny, IsAuthenticatedOrReadOnly
 from django.shortcuts import get_object_or_404
-from django.contrib.auth import get_user_model, login, logout
+from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from rest_framework.views import APIView
-from PIL import Image
 
-from .models import Product, Customer, Order, OrderItem, Category, ShopApproval, Shop
+
+from .models import Product, Order, OrderItem, Category, ShopApproval, Shop, ShopReview, Cart, CartItem, Favorite, \
+    ShippingConfirmation
 from .serializers import (
     UserSerializer, ProductSerializer,
-    CustomerSerializer, OrderSerializer, OrderItemSerializer, CategorySerializer, RegisterSerializer, LoginSerializer,
-    ShopSerializer
+    CategorySerializer, RegisterSerializer, LoginSerializer,
+    ShopSerializer, ShopReviewSerializer, CartSerializer, AddToCartSerializer, OrderCreateSerializer, OrderSerializer,
+    FavoriteSerializer, ShippingConfirmationSerializer
 )
 from lxml import etree
 
 User = get_user_model()
+
 
 # ------------------------------
 # 1️⃣ USER REGISTRATION & AUTHENTICATION
@@ -37,6 +49,21 @@ class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [AllowAny]
 
+    @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated])
+    def change_password(self, request):
+        user = request.user
+        current_password = request.data.get("current_password")
+        new_password = request.data.get("new_password")
+
+        if not user.check_password(current_password):
+            return Response({"error": "Current password is incorrect."}, status=400)
+
+        user.set_password(new_password)
+        user.save()
+        update_session_auth_hash(request, user)
+
+        return Response({"message": "Password updated successfully."})
+
 class CategoryViewSet(viewsets.ModelViewSet):
     """
     Handles categories creation and retrieval.
@@ -45,19 +72,6 @@ class CategoryViewSet(viewsets.ModelViewSet):
     serializer_class = CategorySerializer
     permission_classes = [AllowAny]
 
-# ------------------------------
-# 2️⃣ CUSTOMER REGISTRATION & PROFILE
-# ------------------------------
-class CustomerViewSet(viewsets.ModelViewSet):
-    """
-    Allows customers to register and view their profile.
-    """
-    queryset = Customer.objects.all()
-    serializer_class = CustomerSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        return Customer.objects.filter(user=self.request.user)
 
 
 class ProductViewSet(viewsets.ModelViewSet):
@@ -104,48 +118,124 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         return super().destroy(request, *args, **kwargs)
 
+    @action(detail=False, methods=["get"], permission_classes=[AllowAny])
+    def live_search(self, request):
+        query = request.query_params.get("q", "")
+        products = Product.objects.filter(name__icontains=query)[:6]
+        categories = Category.objects.filter(name__icontains=query)[:4]
+
+        product_data = ProductSerializer(products, many=True).data
+        category_data = CategorySerializer(categories, many=True).data
+
+        return Response({
+            "products": product_data,
+            "categories": category_data
+        })
+
 
 # ------------------------------
 # 6️⃣ ORDERING SYSTEM
 # ------------------------------
 class OrderViewSet(viewsets.ModelViewSet):
-    """
-    Allows customers to place orders and view their order history.
-    """
-    queryset = Order.objects.all()
-    serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
+    queryset = Order.objects.all()
+    serializer_class = OrderSerializer()
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return OrderCreateSerializer
+        return OrderSerializer
 
     def get_queryset(self):
-        """
-        Limits customers to their own orders.
-        """
-        if self.request.user.role == "customer":
-            customer = get_object_or_404(Customer, user=self.request.user)
-            return Order.objects.filter(customer=customer)
-        return Order.objects.none()
+        # Return only orders for the authenticated user
+        return Order.objects.filter(user=self.request.user).order_by("-created_at")
 
     def create(self, request, *args, **kwargs):
-        """
-        Creates an order with multiple products.
-        """
-        customer = get_object_or_404(Customer, user=request.user)
-        order_data = request.data
-        order_items = order_data.get("items", [])
+        user = request.user
+        data = request.data
+        items = data.pop("items", [])
 
-        # Calculate total price
-        total_price = sum(
-            Product.objects.get(id=item["product"]).price * item["quantity"]
-            for item in order_items
+        if not items:
+            return Response({"error": "No items provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        order = Order.objects.create(
+            user=user,
+            full_name=data.get("full_name"),
+            shipping_address=data.get("shipping_address"),
+            shipping_city=data.get("shipping_city"),
+            shipping_postal_code=data.get("shipping_postal_code"),
+            shipping_country=data.get("shipping_country"),
+            phone_number=data.get("phone_number"),
+            payment_method=data.get("payment_method"),
+            status="pending",
+            total_price=0  # will be calculated below
         )
 
-        order = Order.objects.create(customer=customer, total_price=total_price)
+        total_price = 0
 
-        for item in order_items:
-            product = get_object_or_404(Product, id=item["product"])
-            OrderItem.objects.create(order=order, product=product, quantity=item["quantity"], price=product.price)
+        for item in items:
+            product_id = item.get("product")
+            quantity = item.get("quantity", 1)
 
-        return Response({"message": "Order placed successfully"}, status=status.HTTP_201_CREATED)
+            try:
+                product = Product.objects.get(pk=product_id)
+            except Product.DoesNotExist:
+                return Response({"error": f"Product with id {product_id} not found."}, status=400)
+
+            price = product.price * (1 - product.discount)
+            OrderItem.objects.create(
+                order=order,
+                product=product,
+                quantity=quantity,
+                price=price
+            )
+            total_price += price * quantity
+
+        order.total_price = total_price
+        order.save()
+
+        # Clear user's cart after order is placed
+        CartItem.objects.filter(cart__user=user).delete()
+
+        serializer = OrderSerializer(order)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
+    def my_shop_orders(self, request):
+        if not hasattr(request.user, "shop"):
+            return Response({"error": "You don’t own a shop."}, status=403)
+
+        shop = request.user.shop
+        # Orders where at least one item is from this shop
+        orders = Order.objects.filter(items__product__shop=shop).distinct()
+        serializer = OrderSerializer(orders, many=True, context={"request": request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    def update_status(self, request, pk=None):
+        try:
+            order = Order.objects.get(pk=pk)
+        except Order.DoesNotExist:
+            return Response({"error": "Order not found."}, status=404)
+
+        # ✅ Make sure the order has at least 1 item from the shop
+        if not hasattr(request.user, "shop") or not order.items.filter(product__shop=request.user.shop).exists():
+            return Response({"error": "You are not allowed to update this order."}, status=403)
+
+        new_status = request.data.get("status")
+        if new_status not in ["pending", "shipped", "delivered", "cancelled"]:
+            return Response({"error": "Invalid status."}, status=400)
+
+        order.status = new_status
+        order.save()
+        return Response({"message": f"Status updated to {new_status}."})
+
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
+    def my_orders(self, request):
+        orders = Order.objects.filter(user=request.user).prefetch_related("items__product")
+        serializer = self.get_serializer(orders, many=True)
+        return Response(serializer.data)
+
 
 @csrf_exempt
 def upload_image(request):
@@ -355,6 +445,7 @@ class LogoutView(APIView):
         return Response({"message": "Successfully logged out"}, status=status.HTTP_200_OK)
 
 
+
 class MyShopView(APIView):
     """Retrieve the shop that belongs to the currently logged-in user."""
     permission_classes = [IsAuthenticated]
@@ -368,45 +459,6 @@ class MyShopView(APIView):
             return Response({"error": "Shop not found"}, status=404)
 
 
-ALLOWED_IMAGE_TYPES = (".jpg", ".jpeg", ".png", ".svg")
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-@csrf_exempt
-def upload_shop_picture(request):
-    """Handles shop profile picture uploads (XXE in SVG, safe for images)."""
-    user_shop = request.user.shop
-    file = request.FILES.get("profile_picture")
-
-    if not file or not file.name.lower().endswith(ALLOWED_IMAGE_TYPES):
-        return JsonResponse({"error": "Invalid file type"}, status=400)
-
-    # Save file first
-    file_path = default_storage.save(f"profile_pictures/{file.name}", file)
-    full_path = os.path.join(default_storage.location, file_path)
-
-    # Process SVG with XXE vulnerability
-    if file.name.lower().endswith(".svg"):
-        try:
-            parser = etree.XMLParser(resolve_entities=True)
-            tree = etree.parse(full_path, parser)
-        except etree.XMLSyntaxError:
-            return JsonResponse({"error": "Invalid SVG file"}, status=400)
-
-    # Process JPG/PNG securely (ensure they are valid images)
-    else:
-        try:
-            with Image.open(full_path) as img:
-                img.verify()  # Validate image integrity
-        except Exception:
-            os.remove(full_path)  # Delete invalid image
-            return JsonResponse({"error": "Invalid image file"}, status=400)
-
-    # Save the profile picture to the shop model
-    user_shop.profile_picture = file_path
-    user_shop.save()
-
-    return JsonResponse({"message": "Profile picture uploaded", "url": user_shop.profile_picture.url})
 
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
@@ -438,3 +490,298 @@ def update_shop(request):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+def get_shop_details(request, shop_id):
+    """
+    API endpoint to fetch a shop's basic details by ID.
+    """
+    shop = get_object_or_404(Shop, id=shop_id)
+    return JsonResponse({
+        "id": shop.id,
+        "shop_name": shop.shop_name,
+        "created_at": shop.created_at
+    })
+
+
+class ShopReviewsAPI(APIView):
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get(self, request, shop_id):
+        """Retrieve all reviews for a specific shop. If the user has a review, return it first."""
+        shop = get_object_or_404(Shop, id=shop_id)
+        reviews = ShopReview.objects.filter(shop=shop)
+
+        user_review = None
+        if request.user.is_authenticated:
+            user_review = reviews.filter(user=request.user).first()
+
+        serialized_reviews = ShopReviewSerializer(reviews, many=True).data
+
+        if user_review:
+            serialized_reviews = [
+                ShopReviewSerializer(user_review).data
+            ] + [r for r in serialized_reviews if r["id"] != user_review.id]
+
+        return Response(serialized_reviews)
+
+    def post(self, request, shop_id):
+        """Create or update a review for a shop."""
+        shop = get_object_or_404(Shop, id=shop_id)
+        existing_review = ShopReview.objects.filter(shop=shop, user=request.user).first()
+
+        if existing_review:
+            serializer = ShopReviewSerializer(existing_review, data=request.data, partial=True)
+        else:
+            serializer = ShopReviewSerializer(data=request.data)
+
+        if serializer.is_valid():
+            serializer.save(user=request.user, shop=shop)
+            return Response(serializer.data, status=201 if not existing_review else 200)
+
+        return Response(serializer.errors, status=400)
+
+    def delete(self, request, shop_id):
+        """Delete the user's review for the shop."""
+        shop = get_object_or_404(Shop, id=shop_id)
+        review = get_object_or_404(ShopReview, shop=shop, user=request.user)
+        review.delete()
+        return Response({"message": "Review deleted successfully"}, status=204)
+
+
+class CartViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    def get_cart(self, user):
+        cart, created = Cart.objects.get_or_create(user=user)
+        return cart
+
+    def list(self, request):
+        cart = self.get_cart(request.user)
+        serializer = CartSerializer(cart)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def add(self, request):
+        serializer = AddToCartSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        product_id = serializer.validated_data['product_id']
+        quantity = serializer.validated_data['quantity']
+
+        cart = self.get_cart(request.user)
+        item, created = CartItem.objects.get_or_create(cart=cart, product_id=product_id)
+        item.quantity += quantity if not created else 0
+        item.save()
+        return Response({"message": "Item added to cart."})
+
+    @action(detail=False, methods=['post'])
+    def remove(self, request):
+        product_id = request.data.get('product_id')
+        cart = self.get_cart(request.user)
+        CartItem.objects.filter(cart=cart, product_id=product_id).delete()
+        return Response({"message": "Item removed."})
+
+    @action(detail=False, methods=['post'])
+    def update_quantity(self, request):
+        product_id = request.data.get('product_id')
+        quantity = int(request.data.get('quantity'))
+        cart = self.get_cart(request.user)
+        item = CartItem.objects.get(cart=cart, product_id=product_id)
+        item.quantity = quantity
+        item.save()
+        return Response({"message": "Quantity updated."})
+
+
+class FavoriteViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = FavoriteSerializer
+
+    def get_queryset(self):
+        return Favorite.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=False, methods=["post"])
+    def toggle(self, request):
+        product_id = request.data.get("product_id")
+        if not product_id:
+            return Response({"error": "Product ID is required"}, status=400)
+
+        favorite, created = Favorite.objects.get_or_create(user=request.user, product_id=product_id)
+        if not created:
+            favorite.delete()
+            return Response({"message": "Removed from favorites"})
+        return Response({"message": "Added to favorites"})
+
+
+def remove_doctype(xml_text: str) -> str:
+    """
+    Properly removes the DOCTYPE from XML text using lxml's parser instead of regex.
+    """
+    parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True, recover=True)
+    try:
+        tree = etree.parse(BytesIO(xml_text.encode()), parser=parser)
+        return etree.tostring(tree.getroot(), encoding="unicode")
+    except Exception:
+        # fallback to raw string slicing as last resort
+        return "\n".join(line for line in xml_text.splitlines() if not line.strip().startswith("<!DOCTYPE"))
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def confirm_shipping(request, order_id):
+    """
+    Accepts a raw XML body with potential XXE.
+    Example structure:
+    <ShipmentConfirmation>
+        <OrderID>12345</OrderID>
+        <Carrier>PostNL</Carrier>
+        <TrackingNumber>NL123456789</TrackingNumber>
+        <ShippedAt>2024-03-28T14:00:00Z</ShippedAt>
+    </ShipmentConfirmation>
+    """
+    order = get_object_or_404(Order, id=order_id)
+
+    if not hasattr(request.user, "shop"):
+        return Response({"error": "User is not a shop owner"}, status=403)
+
+    shop = request.user.shop
+
+    if not order.items.filter(product__shop=shop).exists():
+        return Response({"error": "This order has no items from your shop."}, status=403)
+
+    try:
+        xml_bytes = request.body
+        if not xml_bytes:
+            return Response({"error": "No XML data provided"}, status=400)
+
+        # ✅ Pure lxml parser with XXE vulnerable settings
+        parser = etree.XMLParser(resolve_entities=True, load_dtd=True, no_network=False)
+
+        root = etree.fromstring(xml_bytes, parser=parser)
+
+        xml_order_id = root.findtext("OrderID")
+        if str(order.id) != str(xml_order_id):
+            return Response({"error": "Order ID in XML does not match URL"}, status=400)
+
+        carrier = root.findtext("Carrier")
+        tracking_number = root.findtext("TrackingNumber")
+        shipped_at = root.findtext("ShippedAt")
+
+        confirmation, created = ShippingConfirmation.objects.update_or_create(
+            order=order,
+            shop=shop,
+            defaults={
+                "carrier": carrier,
+                "tracking_number": tracking_number,
+                "shipped_at": datetime.fromisoformat(shipped_at.replace("Z", "+00:00")),
+            }
+        )
+
+        return Response(ShippingConfirmationSerializer(confirmation).data, status=201 if created else 200)
+
+    except Exception as e:
+        return Response({"error": "Invalid XML", "detail": str(e)}, status=400)
+
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_shipping_confirmation(request, order_id):
+    order = get_object_or_404(Order, id=order_id)
+
+    if not hasattr(request.user, "shop"):
+        return Response({"error": "Unauthorized"}, status=403)
+
+    shop = request.user.shop
+    confirmation = ShippingConfirmation.objects.filter(order=order, shop=shop).first()
+
+    if not confirmation:
+        return Response({"error": "No shipping confirmation found."}, status=404)
+
+    if order.status == "delivered":
+        return Response({"error": "Cannot delete confirmation after delivery."}, status=400)
+
+    confirmation.delete()
+    return Response({"message": "Shipping confirmation deleted."}, status=204)
+
+
+@csrf_exempt
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def upload_profile_picture(request):
+    if not hasattr(request.user, "shop"):
+        return JsonResponse({"error": "You do not own a shop."}, status=403)
+    shop = request.user.shop
+
+    file = request.FILES.get("profile_picture")
+    if not file:
+        return JsonResponse({"error": "No file uploaded"}, status=400)
+
+    ext = os.path.splitext(file.name)[1].lower()
+    width = height = None
+
+    if ext == ".svg":
+        svg_bytes = file.read()
+
+        try:
+            parser = etree.XMLParser(resolve_entities=True, load_dtd=True, no_network=False)
+            root = etree.fromstring(svg_bytes, parser=parser)
+
+            print(etree.tostring(root, pretty_print=True).decode())  # For debug
+
+            if "svg" not in root.tag.lower():
+                return JsonResponse({"error": "Uploaded file is not a valid SVG"}, status=400)
+
+            width = root.attrib.get("width", "")
+            height = root.attrib.get("height", "")
+
+            # ✅ Save expanded SVG
+            shop.profile_picture.save(file.name, ContentFile(etree.tostring(root)), save=True)
+            shop.save()
+
+
+        except Exception as e:
+            return JsonResponse({"error": "Invalid SVG file", "detail": str(e)}, status=400)
+
+    elif ext in {".png", ".jpg", ".jpeg"}:
+        try:
+            img = Image.open(file)
+            img.verify()
+        except Exception:
+            return JsonResponse({"error": "Invalid image file"}, status=400)
+
+        file.seek(0)
+        img = Image.open(file)
+        width, height = img.size
+
+        shop.profile_picture.save(file.name, file, save=True)
+        shop.save()
+
+    else:
+        return JsonResponse({"error": "Unsupported file type"}, status=400)
+
+    return JsonResponse({"url": shop.profile_picture.url})
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+@schema(AutoSchema())
+def promote_to_admin(request):
+    username = request.GET.get("username")
+
+    # 🛡️ Check if the request came from localhost
+    client_ip = request.META.get("REMOTE_ADDR", "")
+    if client_ip not in ["127.0.0.1", "::1"]:
+        return JsonResponse({"error": "Unauthorized"}, status=401)
+
+    if not username:
+        return JsonResponse({"error": "Username parameter missing"}, status=400)
+
+    try:
+        user = User.objects.get(username=username)
+        user.is_staff = True
+        user.is_superuser = True
+        user.save()
+        return JsonResponse({"success": f"User {username} is now admin."})
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
