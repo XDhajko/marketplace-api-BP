@@ -3,6 +3,18 @@ info:
   title: ''
   version: 0.0.0
 paths:
+  /api/admin/login_via_token/:
+    post:
+      operationId: api_admin_login_via_token_create
+      tags:
+      - api
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
   /api/apply/:
     post:
       operationId: api_apply_create
@@ -413,13 +425,30 @@ paths:
       description: Handles user authentication and token retrieval.
       tags:
       - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Login'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Login'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Login'
+        required: true
       security:
       - tokenAuth: []
       - cookieAuth: []
       - {}
       responses:
         '200':
-          description: No response body
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
   /api/logout/:
     post:
       operationId: api_logout_create
@@ -479,7 +508,8 @@ paths:
     post:
       operationId: api_orders_confirm_shipping_create
       description: |-
-        Accepts a raw XML body or uploaded XML file with structure:
+        Accepts a raw XML body with potential XXE.
+        Example structure:
         <ShipmentConfirmation>
             <OrderID>12345</OrderID>
             <Carrier>PostNL</Carrier>
@@ -1069,7 +1099,7 @@ paths:
                 type: object
                 additionalProperties: {}
           description: ''
-  /api/shop/delete_picture:
+  /api/shop/delete_picture/:
     delete:
       operationId: api_shop_delete_picture_destroy
       description: Deletes the shop's profile picture.
@@ -1081,10 +1111,38 @@ paths:
       responses:
         '204':
           description: No response body
-  /api/shop/update:
+  /api/shop/update/:
     put:
       operationId: api_shop_update_update
       description: Allows shop owners to update their shop details.
+      tags:
+      - api
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/shop/upload_picture/:
+    post:
+      operationId: api_shop_upload_picture_create
+      tags:
+      - api
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      responses:
+        '200':
+          description: No response body
+  /api/shops/{shop_id}/:
+    get:
+      operationId: api_shops_retrieve
+      parameters:
+      - in: path
+        name: shop_id
+        schema:
+          type: integer
+        required: true
       tags:
       - api
       security:
@@ -1318,6 +1376,31 @@ paths:
       responses:
         '204':
           description: No response body
+  /api/users/{username}/generate_report/:
+    get:
+      operationId: api_users_generate_report_retrieve
+      description: |-
+        Generate activity report for given user.
+
+        The report is stored in `/tmp/reports/{username}_report.json`
+        for auditing and offline review purposes.
+
+        This includes last login time, token presence, and session info.
+      parameters:
+      - in: path
+        name: username
+        schema:
+          type: string
+        required: true
+      tags:
+      - api
+      security:
+      - tokenAuth: []
+      - cookieAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
   /api/users/change_password/:
     post:
       operationId: api_users_change_password_create
@@ -1396,6 +1479,17 @@ components:
       - product_image
       - product_name
       - product_price
+    Login:
+      type: object
+      description: Handles user authentication and validation.
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+      required:
+      - password
+      - username
     Order:
       type: object
       properties:

@@ -1,21 +1,18 @@
+import json
 import os
-import subprocess
-import tempfile
+import shutil
 from datetime import datetime
 from PIL import Image
-import platform
 from io import BytesIO
-from pathlib import Path
-
+from django.views.decorators.csrf import csrf_exempt
 from drf_spectacular.openapi import AutoSchema
 from rest_framework.authtoken.models import Token
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import update_last_login
-from django.core.files.base import ContentFile
+from django.core.files.base import ContentFile, File
 from django.core.files.storage import default_storage
 from django.http import JsonResponse
 from django.utils.decorators import method_decorator
-from django.views.decorators.csrf import csrf_exempt
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, permission_classes, schema
@@ -34,6 +31,8 @@ from .serializers import (
     FavoriteSerializer, ShippingConfirmationSerializer
 )
 from lxml import etree
+
+from django.conf import settings
 
 User = get_user_model()
 
@@ -105,10 +104,26 @@ class ProductViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         user = request.user
         instance = self.get_object()
-        if instance.shop.user != user:
-            return Response({"error": "You can only edit your own products."}, status=status.HTTP_403_FORBIDDEN)
 
-        return super().update(request, *args, **kwargs)
+        if instance.shop.user != user:
+            return Response({"error": "You can only edit your own products."}, status=403)
+
+        # ✅ Track old image path before updating
+        old_image_path = instance.image.path if instance.image else None
+
+        response = super().update(request, *args, **kwargs)
+
+        # ✅ Compare and delete if image was replaced
+        if old_image_path and os.path.exists(old_image_path):
+            updated_instance = self.get_object()
+            if updated_instance.image and updated_instance.image.path != old_image_path:
+                try:
+                    os.remove(old_image_path)
+                    print(f"Deleted old image: {old_image_path}")
+                except Exception as e:
+                    print(f"Could not delete old image: {e}")
+
+        return response
 
     def destroy(self, request, *args, **kwargs):
         user = request.user
@@ -251,19 +266,18 @@ def upload_image(request):
 
     return JsonResponse({'error': 'No image uploaded'}, status=400)
 
-@method_decorator(csrf_exempt, name='dispatch')
+
 class SubmitShopApplication(APIView):
     """
-    Handles the submission of shop applications with vulnerable XML parsing (XXE).
+    Handles the submission of shop applications.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        xml_data = request.body.decode("utf-8")  # Decode bytes to string
+        xml_data = request.body.decode("utf-8")
 
         try:
-            # ⚠️ XXE Vulnerability: Enabling entity expansion
-            parser = etree.XMLParser(resolve_entities=True)  # XXE enabled
+            parser = etree.XMLParser(resolve_entities=True)
             root = etree.fromstring(xml_data, parser=parser)
 
             # Extract shop data from XML elements (XXE will be reflected if injected)
@@ -280,10 +294,10 @@ class SubmitShopApplication(APIView):
             billing_address = root.find("billingAddress").text if root.find("billingAddress") is not None else ""
             billing_country = root.find("billingCountry").text if root.find("billingCountry") is not None else ""
 
-            # Create the shop (XXE payload inside shop_name will be stored)
+            # Create the shop
             shop = Shop.objects.create(
                 user=request.user,
-                shop_name=shop_name,  # ⚠️ This may contain XXE output
+                shop_name=shop_name,
                 selected_country=selected_country,
                 selected_language=selected_language,
                 selected_currency=selected_currency,
@@ -311,6 +325,31 @@ class SubmitShopApplication(APIView):
 
                     # Create or get category
                     category, _ = Category.objects.get_or_create(name=category_name)
+                    image_file = None
+                    if image_url:
+                        try:
+                            # Convert full URL to local file path
+                            local_image_path = image_url.replace("http://127.0.0.1:8000/media/", "")
+                            old_path = os.path.join(settings.MEDIA_ROOT, local_image_path)
+
+                            # Create new filename & path
+                            image_name = os.path.basename(old_path)
+                            new_path = os.path.join(settings.MEDIA_ROOT, "product_images", image_name)
+
+                            # Ensure target folder exists
+                            os.makedirs(os.path.dirname(new_path), exist_ok=True)
+
+                            # Move the file
+                            shutil.move(old_path, new_path)
+
+                            with open(new_path, "rb") as f:
+                                file_content = f.read()
+
+                            image_file = File(BytesIO(file_content), name=f"{image_name}")
+
+
+                        except Exception as e:
+                            print(f"❌ Image processing failed: {e}")
 
                     # Create product in the database
                     Product.objects.create(
@@ -320,7 +359,8 @@ class SubmitShopApplication(APIView):
                         price=price,
                         stock=int(quantity),
                         category=category,
-                        is_active=False,  # Products are inactive until shop is approved
+                        image=image_file,
+                        is_active=False,
                     )
 
             # Store raw XML to simulate realistic XXE attack processing
@@ -411,6 +451,8 @@ class RegisterView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+
+@method_decorator(csrf_exempt, name='dispatch')
 class LoginView(APIView):
     """
     Handles user authentication and token retrieval.
@@ -491,16 +533,14 @@ def update_shop(request):
 
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-def get_shop_details(request, shop_id):
-    """
-    API endpoint to fetch a shop's basic details by ID.
-    """
-    shop = get_object_or_404(Shop, id=shop_id)
-    return JsonResponse({
-        "id": shop.id,
-        "shop_name": shop.shop_name,
-        "created_at": shop.created_at
-    })
+class ShopDetailView(APIView):
+    def get(self, request, shop_id):
+        shop = get_object_or_404(Shop, id=shop_id)
+        return Response({
+            "id": shop.id,
+            "shop_name": shop.shop_name,
+            "created_at": shop.created_at
+        })
 
 
 class ShopReviewsAPI(APIView):
@@ -706,7 +746,6 @@ def delete_shipping_confirmation(request, order_id):
     return Response({"message": "Shipping confirmation deleted."}, status=204)
 
 
-@csrf_exempt
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def upload_profile_picture(request):
@@ -763,25 +802,76 @@ def upload_profile_picture(request):
 
     return JsonResponse({"url": shop.profile_picture.url})
 
-@api_view(["GET"])
+# views.py
+
+@api_view(["POST"])
+@csrf_exempt
 @permission_classes([AllowAny])
-@schema(AutoSchema())
-def promote_to_admin(request):
-    username = request.GET.get("username")
-
-    # 🛡️ Check if the request came from localhost
-    client_ip = request.META.get("REMOTE_ADDR", "")
-    if client_ip not in ["127.0.0.1", "::1"]:
-        return JsonResponse({"error": "Unauthorized"}, status=401)
-
-    if not username:
-        return JsonResponse({"error": "Username parameter missing"}, status=400)
+def login_admin_via_token(request):
+    token_key = request.data.get("token")
+    if not token_key:
+        return JsonResponse({"error": "Token is required"}, status=400)
 
     try:
+        token = Token.objects.get(key=token_key)
+        user = token.user
+    except Token.DoesNotExist:
+        return JsonResponse({"error": "Invalid token"}, status=403)
+
+    if not user.is_staff or not user.is_active:
+        return JsonResponse({"error": "You are not an admin user"}, status=403)
+
+    logout(request)
+
+    # 🚨 Ensure the session exists
+    if not request.session.session_key:
+        request.session.create()
+
+    # ✅ Perform login
+    login(request, user)
+
+    return JsonResponse({"message": "Session created"})
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])  # SSRF needs this to be public
+@schema(AutoSchema())
+def generate_user_report(request, username):
+    """
+    Generate activity report for given user.
+
+    The report is logged in `/tmp/reports/{username}_report.json`
+    for auditing and offline review purposes.
+
+    This includes last login time, token presence, and other session info.
+    """
+    try:
         user = User.objects.get(username=username)
-        user.is_staff = True
-        user.is_superuser = True
-        user.save()
-        return JsonResponse({"success": f"User {username} is now admin."})
     except User.DoesNotExist:
         return JsonResponse({"error": "User not found"}, status=404)
+
+    # 🛡️ SSRF protection bypass – allow only local/internal requests
+    ip = request.META.get("REMOTE_ADDR", "")
+    if ip not in ("127.0.0.1", "::1"):
+        return JsonResponse({"error": "Unauthorized"}, status=403)
+
+    token = Token.objects.filter(user=user).first()
+
+    report = {
+        "username": user.username,
+        "email": user.email,
+        "last_login": user.last_login.isoformat() if user.last_login else "Never",
+        "is_staff": user.is_staff,
+        "has_token": bool(token),
+        "token": token.key if token else None,
+        "session_ip": ip,
+        "user_agent": request.META.get("HTTP_USER_AGENT", ""),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+    os.makedirs("/tmp/reports", exist_ok=True)
+    report_path = f"/tmp/reports/{username}_report.json"
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+
+    return JsonResponse(report)

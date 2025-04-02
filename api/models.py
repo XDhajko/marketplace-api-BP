@@ -6,6 +6,7 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 
 from PIL import Image
+from rest_framework.response import Response
 
 User = get_user_model()
 
@@ -134,12 +135,26 @@ class Product(models.Model):
         return self.name
 
     def save(self, *args, **kwargs):
+        original_file_path = self.image.path if self.image and self.image.name else None
+
         if self.image:
             new_name, processed_image = process_image(self.image)
             if processed_image:
                 self.image.save(new_name, processed_image, save=False)
 
         super().save(*args, **kwargs)
+
+        if original_file_path and os.path.exists(original_file_path):
+            # Compare just filenames
+            current_image_name = os.path.basename(self.image.name)
+            old_image_name = os.path.basename(original_file_path)
+
+            if current_image_name != old_image_name:
+                try:
+                    os.remove(original_file_path)
+                    print(f"Removed original image: {original_file_path}")
+                except Exception as e:
+                    print(f"Could not remove original image: {e}")
 
 # -----------------------
 # Order & Order Items

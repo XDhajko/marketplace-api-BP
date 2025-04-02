@@ -35,10 +35,6 @@ DEBUG = True
 
 ALLOWED_HOSTS = ["127.0.0.1","10.10.10.10","10.10.10.30","localhost"]
 
-if DEBUG:
-    CORS_ALLOW_ALL_ORIGINS = True  # Only for development
-# Application definition
-
 INSTALLED_APPS = [
     'corsheaders',
     'django.contrib.admin',
@@ -54,22 +50,26 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    "corsheaders.middleware.CorsMiddleware",
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-    #'django.middleware.csrf.CsrfViewMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-# Allow React Vite Dev Server (localhost:5173) for CORS
+CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",  # React frontend
-    "http://127.0.0.1:5173",  # Alternative local access
-    "http://10.10.10.10"
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
 ]
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SECURE = False
+
 
 # Allow CSRF for local frontend
 CSRF_TRUSTED_ORIGINS = [
@@ -82,6 +82,8 @@ CSRF_TRUSTED_ORIGINS = [
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-CSRFToken",
     "Authorization",
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
 ]
 
 # Allow CORS for all methods (GET, POST, PUT, DELETE, etc.)

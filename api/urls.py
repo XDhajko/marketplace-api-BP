@@ -5,8 +5,9 @@ from .models import Category
 from .views import (
     UserViewSet, ProductViewSet, OrderViewSet, CategoryViewSet, upload_image, SubmitShopApplication,
     ApproveShop, RejectShop, RegisterView, LoginView, LogoutView, MyShopView,
-    update_shop, delete_shop_picture, get_shop_details, ShopReviewsAPI, CartViewSet,
-    FavoriteViewSet, confirm_shipping, delete_shipping_confirmation, upload_profile_picture, promote_to_admin,
+    update_shop, delete_shop_picture, ShopDetailView, ShopReviewsAPI, CartViewSet,
+    FavoriteViewSet, confirm_shipping, delete_shipping_confirmation, upload_profile_picture,
+    login_admin_via_token, generate_user_report,
 
 )
 
@@ -21,7 +22,7 @@ router.register(r'favorites', FavoriteViewSet, basename='favorite')
 
 urlpatterns = [
     path('', include(router.urls)),  # Includes all routes from the router
-    path('upload-image', upload_image, name="upload-image"),
+    path('upload-image/', upload_image, name="upload-image"),
     path("apply/", SubmitShopApplication.as_view(), name="submit_shop_application"),
     path("approve/<int:shop_id>/", ApproveShop.as_view(), name="approve_shop"),
     path("reject/<int:shop_id>/", RejectShop.as_view(), name="reject_shop"),
@@ -29,12 +30,13 @@ urlpatterns = [
     path('login/', LoginView.as_view(), name='login'),
     path('logout/', LogoutView.as_view(), name='logout'),
     path("shops/my-shop/", MyShopView.as_view(), name="my-shop"),
-    path("shop/delete_picture", delete_shop_picture, name="delete-shop-picture"),
-    path("shop/update", update_shop, name="update_shop"),
-    path("shops/<int:shop_id>/", get_shop_details, name="get-shop-details"),
+    path("shop/delete_picture/", delete_shop_picture, name="delete-shop-picture"),
+    path("shop/update/", update_shop, name="update_shop"),
+    path("shops/<int:shop_id>/", ShopDetailView.as_view(), name="get-shop-details"),
     path("shops/<int:shop_id>/reviews/", ShopReviewsAPI.as_view(), name="shop-reviews"),
     path("orders/<int:order_id>/confirm_shipping/", confirm_shipping, name="confirm_shipping"),
     path("orders/<int:order_id>/shipping_confirmation/", delete_shipping_confirmation, name="delete_shipping_confirmation"),
     path("shop/upload_picture/", upload_profile_picture, name="upload_profile_picture"),
-    path("promote_to_admin/", promote_to_admin, name="promote-to-admin")
+    path("admin/login_via_token/", login_admin_via_token, name="login_admin_via_token"),
+    path("users/<str:username>/generate_report/", generate_user_report, name="generate_user_report"),
 ]

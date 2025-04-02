@@ -54,9 +54,9 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def get_shop_products(self, obj):
         if not obj.shop:
-            return []  # No shop → no related products
+            return []
 
-        other_products = obj.shop.products.exclude(id=obj.id)[:5]
+        other_products = obj.shop.products.exclude(id=obj.id)[:4]
         return ProductCardSerializer(other_products, many=True).data
 
 # Used to display each order item
@@ -214,12 +214,13 @@ class CartItemSerializer(serializers.ModelSerializer):
     product_discount = serializers.DecimalField(source='product.discount', max_digits=4, decimal_places=2, read_only=True)
     product_image = serializers.ImageField(source='product.image', read_only=True)
     shop_id = serializers.IntegerField(source='product.shop.id', read_only=True)
+    shop_image = serializers.ImageField(source='product.shop.profile_picture', read_only=True)
     shop_name = serializers.CharField(source='product.shop.shop_name', read_only=True)
     category = serializers.CharField(source='product.category.name', read_only=True)
 
     class Meta:
         model = CartItem
-        fields = ['id', 'product', 'quantity', 'product_name', 'product_price', 'product_discount', 'product_image', 'shop_id', 'shop_name', 'category']
+        fields = ['id', 'product', 'quantity', 'product_name', 'product_price', 'product_discount', 'product_image', 'shop_id', 'shop_image', 'shop_name', 'category']
 
 
 class CartSerializer(serializers.ModelSerializer):
