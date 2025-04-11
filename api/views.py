@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import subprocess
 from datetime import datetime
 from PIL import Image
 from io import BytesIO
@@ -654,17 +655,17 @@ class FavoriteViewSet(viewsets.ModelViewSet):
         return Response({"message": "Added to favorites"})
 
 
-def remove_doctype(xml_text: str) -> str:
-    """
-    Properly removes the DOCTYPE from XML text using lxml's parser instead of regex.
-    """
-    parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True, recover=True)
-    try:
-        tree = etree.parse(BytesIO(xml_text.encode()), parser=parser)
-        return etree.tostring(tree.getroot(), encoding="unicode")
-    except Exception:
-        # fallback to raw string slicing as last resort
-        return "\n".join(line for line in xml_text.splitlines() if not line.strip().startswith("<!DOCTYPE"))
+def parse_xml_with_docker(xml_bytes):
+    proc = subprocess.run(
+        ["docker", "run", "-i", "--rm", "xxe-parser:php56"],
+        input=xml_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5
+    )
+    if proc.returncode != 0:
+        raise Exception("Docker parsing failed: " + proc.stderr.decode())
+    return proc.stdout.decode()
 
 
 @api_view(["POST"])
@@ -695,18 +696,16 @@ def confirm_shipping(request, order_id):
         if not xml_bytes:
             return Response({"error": "No XML data provided"}, status=400)
 
-        # ✅ Pure lxml parser with XXE vulnerable settings
-        parser = etree.XMLParser(resolve_entities=True, load_dtd=True, no_network=False)
+        parsed_output = parse_xml_with_docker(xml_bytes)
+        data = json.loads(parsed_output)  # The PHP script must output a JSON dict!
 
-        root = etree.fromstring(xml_bytes, parser=parser)
-
-        xml_order_id = root.findtext("OrderID")
+        xml_order_id = data.get("OrderID")
         if str(order.id) != str(xml_order_id):
             return Response({"error": "Order ID in XML does not match URL"}, status=400)
 
-        carrier = root.findtext("Carrier")
-        tracking_number = root.findtext("TrackingNumber")
-        shipped_at = root.findtext("ShippedAt")
+        carrier = data.get("Carrier")
+        tracking_number = data.get("TrackingNumber")
+        shipped_at = data.get("ShippedAt")
 
         confirmation, created = ShippingConfirmation.objects.update_or_create(
             order=order,
