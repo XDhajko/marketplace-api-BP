@@ -3,11 +3,10 @@ from rest_framework.routers import DefaultRouter
 
 from .models import Category
 from .views import (
-    UserViewSet, ProductViewSet, OrderViewSet, CategoryViewSet, upload_image, SubmitShopApplication,
-    ApproveShop, RejectShop, RegisterView, LoginView, LogoutView, MyShopView,
+    UserViewSet, ProductViewSet, OrderViewSet, CategoryViewSet, upload_image, SubmitShopApplication, RegisterView, LoginView, LogoutView, MyShopView,
     update_shop, delete_shop_picture, ShopDetailView, ShopReviewsAPI, CartViewSet,
     FavoriteViewSet, confirm_shipping, delete_shipping_confirmation, upload_profile_picture,
-    login_admin_via_token, generate_user_report,
+    login_admin_via_token
 
 )
 
@@ -24,8 +23,6 @@ urlpatterns = [
     path('', include(router.urls)),  # Includes all routes from the router
     path('upload-image/', upload_image, name="upload-image"),
     path("apply/", SubmitShopApplication.as_view(), name="submit_shop_application"),
-    path("approve/<int:shop_id>/", ApproveShop.as_view(), name="approve_shop"),
-    path("reject/<int:shop_id>/", RejectShop.as_view(), name="reject_shop"),
     path('register/', RegisterView.as_view(), name='register'),
     path('login/', LoginView.as_view(), name='login'),
     path('logout/', LogoutView.as_view(), name='logout'),
@@ -38,5 +35,4 @@ urlpatterns = [
     path("orders/<int:order_id>/shipping_confirmation/", delete_shipping_confirmation, name="delete_shipping_confirmation"),
     path("shop/upload_picture/", upload_profile_picture, name="upload_profile_picture"),
     path("admin/login_via_token/", login_admin_via_token, name="login_admin_via_token"),
-    path("users/<str:username>/generate_report/", generate_user_report, name="generate_user_report"),
 ]
