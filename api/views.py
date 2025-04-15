@@ -378,59 +378,6 @@ class SubmitShopApplication(APIView):
         except Exception as e:
             return JsonResponse({"error": "Invalid XML format", "details": str(e)}, status=400)
 
-
-
-
-@method_decorator(login_required, name='dispatch')
-class ApproveShop(APIView):
-    """
-    Handles shop approval by admins.
-    """
-
-    def post(self, request, shop_id):
-        if not request.user.is_staff:
-            return JsonResponse({"error": "Permission denied"}, status=403)
-
-        approval = get_object_or_404(ShopApproval, shop_id=shop_id)
-
-        if approval.status != "pending":
-            return JsonResponse({"error": "Shop is already processed"}, status=400)
-
-        # Activate the shop
-        approval.shop.is_active = True
-        approval.shop.save()
-
-        # Activate all products under this shop
-        Product.objects.filter(shop=approval.shop).update(is_active=True)
-
-        # Mark approval as completed
-        approval.status = "approved"
-        approval.save()
-
-        return JsonResponse({"message": f"Shop {approval.shop.shop_name} has been approved."})
-
-
-
-@method_decorator(login_required, name='dispatch')
-class RejectShop(APIView):
-    """
-    Handles shop rejection by admins.
-    """
-
-    def post(self, request, shop_id):
-        if not request.user.is_staff:
-            return JsonResponse({"error": "Permission denied"}, status=403)
-
-        approval = get_object_or_404(ShopApproval, shop_id=shop_id)
-
-        if approval.status != "pending":
-            return JsonResponse({"error": "Shop is already processed"}, status=400)
-
-        approval.reject()  # Keep the shop inactive
-
-        return JsonResponse({"message": f"Shop {approval.shop.shop_name} has been rejected."})
-
-
 class RegisterView(APIView):
     """
     Handles user registration and automatic login upon success.
@@ -831,46 +778,3 @@ def login_admin_via_token(request):
 
     return JsonResponse({"message": "Session created"})
 
-
-@api_view(["GET"])
-@permission_classes([AllowAny])  # SSRF needs this to be public
-@schema(AutoSchema())
-def generate_user_report(request, username):
-    """
-    Generate activity report for given user.
-
-    The report is logged in `/tmp/reports/{username}_report.json`
-    for auditing and offline review purposes.
-
-    This includes last login time, token presence, and other session info.
-    """
-    try:
-        user = User.objects.get(username=username)
-    except User.DoesNotExist:
-        return JsonResponse({"error": "User not found"}, status=404)
-
-    # 🛡️ SSRF protection bypass – allow only local/internal requests
-    ip = request.META.get("REMOTE_ADDR", "")
-    if ip not in ("127.0.0.1", "::1"):
-        return JsonResponse({"error": "Unauthorized"}, status=403)
-
-    token = Token.objects.filter(user=user).first()
-
-    report = {
-        "username": user.username,
-        "email": user.email,
-        "last_login": user.last_login.isoformat() if user.last_login else "Never",
-        "is_staff": user.is_staff,
-        "has_token": bool(token),
-        "token": token.key if token else None,
-        "session_ip": ip,
-        "user_agent": request.META.get("HTTP_USER_AGENT", ""),
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-    os.makedirs("/tmp/reports", exist_ok=True)
-    report_path = f"/tmp/reports/{username}_report.json"
-    with open(report_path, "w") as f:
-        json.dump(report, f, indent=2)
-
-    return JsonResponse(report)
