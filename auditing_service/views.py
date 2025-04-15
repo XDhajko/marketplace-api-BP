@@ -1,17 +1,20 @@
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.authtoken.models import Token
-from ..api.models import Shop, ShopApproval, Product
+from api.models import Shop, ShopApproval, Product
 from datetime import datetime
 import os
 import json
+
+from rest_framework.permissions import AllowAny
 
 User = get_user_model()
 
 # 1. Approve a shop
 @api_view(["POST"])
+@permission_classes([AllowAny])
 def approve_shop(request, shop_id):
     approval = get_object_or_404(ShopApproval, shop_id=shop_id)
 
@@ -33,6 +36,7 @@ def approve_shop(request, shop_id):
 
 # 2. Reject a shop
 @api_view(["POST"])
+@permission_classes([AllowAny])
 def reject_shop(request, shop_id):
     approval = get_object_or_404(ShopApproval, shop_id=shop_id)
 
@@ -48,6 +52,7 @@ def reject_shop(request, shop_id):
 
 # 3. Return user token info
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def user_report(request, username):
     user = get_object_or_404(User, username=username)
     token = Token.objects.filter(user=user).first()
@@ -64,6 +69,7 @@ def user_report(request, username):
 
 # 4. Aggregate shop statuses
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def shop_status_stats(request):
     stats = {
         "approved": ShopApproval.objects.filter(status="approved").count(),
@@ -75,6 +81,7 @@ def shop_status_stats(request):
 
 # 5. Return recent login events (mocked)
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def login_events(request):
     recent_users = User.objects.order_by("-last_login")[:5]
     logins = [
@@ -89,6 +96,7 @@ def login_events(request):
 
 # 6. Shop report with approval + products
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def shop_report(request, shop_id):
     shop = get_object_or_404(Shop, id=shop_id)
     approval = ShopApproval.objects.filter(shop=shop).first()
@@ -103,6 +111,7 @@ def shop_report(request, shop_id):
 
 # 7. User activity report (writes to file)
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def generate_user_report(request, username):
     user = get_object_or_404(User, username=username)
     token = Token.objects.filter(user=user).first()
