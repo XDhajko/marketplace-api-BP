@@ -604,7 +604,7 @@ class FavoriteViewSet(viewsets.ModelViewSet):
 
 def parse_xml_with_docker(xml_bytes):
     proc = subprocess.run(
-        ["docker", "run", "-i", "--rm", "xxe-parser:php56"],
+        ["docker", "run", "-i", "--rm", "--network=host", "xxe-parser:php56"],
         input=xml_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
