@@ -267,6 +267,20 @@ def upload_image(request):
 
     return JsonResponse({'error': 'No image uploaded'}, status=400)
 
+def run_xml_as_seller(xml_data):
+    result = subprocess.run(
+        ["sudo", "-u", "xxe_seller", "python3", "/opt/xxe/sandboxed_xxe_parser.py"],
+        input=xml_data.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+    )
+
+    if result.returncode != 0:
+        raise Exception(result.stderr.decode())
+
+    return result.stdout.decode()
+
 
 class SubmitShopApplication(APIView):
     """
@@ -278,8 +292,8 @@ class SubmitShopApplication(APIView):
         xml_data = request.body.decode("utf-8")
 
         try:
-            parser = etree.XMLParser(resolve_entities=True)
-            root = etree.fromstring(xml_data, parser=parser)
+            parsed_xml = run_xml_as_seller(xml_data)
+            root = etree.fromstring(parsed_xml.encode("utf-8"))
 
             # Extract shop data from XML elements (XXE will be reflected if injected)
             shop_name = root.find("shopName").text if root.find("shopName") is not None else "Unnamed Shop"
@@ -691,6 +705,19 @@ def delete_shipping_confirmation(request, order_id):
     confirmation.delete()
     return Response({"message": "Shipping confirmation deleted."}, status=204)
 
+def run_xml_as_uploader(xml_data):
+    result = subprocess.run(
+        ["sudo", "-u", "xxe_upload", "python3", "/opt/xxe/sandboxed_xxe_parser.py"],
+        input=xml_data.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+    )
+
+    if result.returncode != 0:
+        raise Exception(result.stderr.decode())
+
+    return result.stdout.decode()
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -710,10 +737,8 @@ def upload_profile_picture(request):
         svg_bytes = file.read()
 
         try:
-            parser = etree.XMLParser(resolve_entities=True, load_dtd=True, no_network=False)
-            root = etree.fromstring(svg_bytes, parser=parser)
-
-            print(etree.tostring(root, pretty_print=True).decode())  # For debug
+            parsed_svg = run_xml_as_uploader(svg_bytes.decode("utf-8"))
+            root = etree.fromstring(parsed_svg.encode("utf-8"))
 
             if "svg" not in root.tag.lower():
                 return JsonResponse({"error": "Uploaded file is not a valid SVG"}, status=400)

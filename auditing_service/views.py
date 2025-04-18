@@ -2,17 +2,54 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 from rest_framework.authtoken.models import Token
+from drf_spectacular.utils import extend_schema
 from api.models import Shop, ShopApproval, Product
 from datetime import datetime
 import os
 import json
 
-from rest_framework.permissions import AllowAny
-
 User = get_user_model()
 
-# 1. Approve a shop
+
+import os
+from datetime import datetime
+from django.http import JsonResponse
+from django.shortcuts import get_object_or_404
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from drf_spectacular.utils import extend_schema
+from api.models import Shop, ShopApproval, Product
+
+
+# Define a general audit log directory
+AUDIT_LOG_DIR = "/var/log/auditing" if os.name != "nt" else "C:/auditing_logs"
+os.makedirs(AUDIT_LOG_DIR, exist_ok=True)
+
+def log_shop_action(shop_name, status, performed_by):
+    timestamp = datetime.utcnow().isoformat()
+    log_entry = f"[{timestamp}] Shop '{shop_name}' was {status} by {performed_by}\n"
+    with open(os.path.join(AUDIT_LOG_DIR, "shop_audit_log.txt"), "a", encoding="utf-8") as log_file:
+        log_file.write(log_entry)
+
+
+@extend_schema(
+    description=f"""
+Approve a pending shop.
+
+This endpoint activates the shop and all its products **only if its status is currently 'pending'**.
+
+All actions are logged for auditing purposes. Each approval is recorded to /var/log/auditing/shop_audit_log.txt.
+
+Each log entry contains:
+- Shop name
+- Action performed ('approved')
+- UTC timestamp
+- Username of the staff/admin who performed the action
+""",
+    responses={200: {"type": "object", "properties": {"message": {"type": "string"}}}}
+)
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def approve_shop(request, shop_id):
@@ -21,20 +58,36 @@ def approve_shop(request, shop_id):
     if approval.status != "pending":
         return JsonResponse({"error": "Shop already processed"}, status=400)
 
-    # Mark as approved
     approval.status = "approved"
     approval.save()
 
-    # Activate the shop
     approval.shop.is_active = True
     approval.shop.save()
 
-    # Activate products under this shop
     Product.objects.filter(shop=approval.shop).update(is_active=True)
+
+    performed_by = getattr(request.user, "username", "Unknown")
+    log_shop_action(approval.shop.shop_name, "approved", performed_by)
 
     return JsonResponse({"message": f"Shop '{approval.shop.shop_name}' approved."})
 
-# 2. Reject a shop
+
+@extend_schema(
+    description=f"""
+Reject a pending shop.
+
+This sets the shop's approval status to 'rejected' **if it is currently 'pending'**.
+
+All actions are logged for auditing purposes. Each rejection is recorded to /var/log/auditing/shop_audit_log.txt.
+
+Each log entry contains:
+- Shop name
+- Action performed ('rejected')
+- UTC timestamp
+- Username of the staff/admin who performed the action
+""",
+    responses={200: {"type": "object", "properties": {"message": {"type": "string"}}}}
+)
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def reject_shop(request, shop_id):
@@ -43,31 +96,76 @@ def reject_shop(request, shop_id):
     if approval.status != "pending":
         return JsonResponse({"error": "Shop already processed"}, status=400)
 
-    # Mark as rejected
     approval.status = "rejected"
     approval.save()
+
+    performed_by = getattr(request.user, "username", "Unknown")
+    log_shop_action(approval.shop.shop_name, "rejected", performed_by)
 
     return JsonResponse({"message": f"Shop '{approval.shop.shop_name}' rejected."})
 
 
-# 3. Return user token info
+
+@extend_schema(
+    description="""
+Retrieve detailed user session information.
+
+This endpoint is used for auditing and debugging purposes. It returns the user’s email, staff status, token (if exists), last login, and active status. It also includes authentication-related cookie values from the request.
+
+⚠️ WARNING: This exposes sensitive authentication info such as tokens and session cookies. Should not be publicly accessible in production.
+""",
+    responses={200: {
+        "type": "object",
+        "properties": {
+            "username": {"type": "string"},
+            "email": {"type": "string"},
+            "is_staff": {"type": "boolean"},
+            "is_active": {"type": "boolean"},
+            "last_login": {"type": "string"},
+            "token": {"type": "string"},
+            "cookies": {
+                "type": "object",
+                "properties": {
+                    "csrftoken": {"type": "string"},
+                    "sessionid": {"type": "string"},
+                }
+            }
+        }
+    }}
+)
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def user_report(request, username):
     user = get_object_or_404(User, username=username)
     token = Token.objects.filter(user=user).first()
 
+    cookies = {
+        "csrftoken": request.COOKIES.get("csrftoken"),
+        "sessionid": request.COOKIES.get("sessionid")
+    }
+
     return JsonResponse({
         "username": user.username,
         "email": user.email,
         "is_staff": user.is_staff,
         "is_active": user.is_active,
+        "cookies": cookies,
         "last_login": user.last_login.isoformat() if user.last_login else None,
         "token": token.key if token else None
     })
 
 
-# 4. Aggregate shop statuses
+@extend_schema(
+    description="Returns a count of shops grouped by their approval status (approved, pending, rejected).",
+    responses={200: {
+        "type": "object",
+        "properties": {
+            "approved": {"type": "integer"},
+            "pending": {"type": "integer"},
+            "rejected": {"type": "integer"}
+        }
+    }}
+)
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def shop_status_stats(request):
@@ -79,7 +177,24 @@ def shop_status_stats(request):
     return JsonResponse(stats)
 
 
-# 5. Return recent login events (mocked)
+@extend_schema(
+    description="Returns the most recent 5 user login events ordered by last login date.",
+    responses={200: {
+        "type": "object",
+        "properties": {
+            "logins": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "username": {"type": "string"},
+                        "last_login": {"type": "string"}
+                    }
+                }
+            }
+        }
+    }}
+)
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def login_events(request):
@@ -94,7 +209,26 @@ def login_events(request):
     return JsonResponse({"logins": logins})
 
 
-# 6. Shop report with approval + products
+@extend_schema(
+    description="Generate a report for a specific shop, including its approval status and the list of its products.",
+    responses={200: {
+        "type": "object",
+        "properties": {
+            "shop_name": {"type": "string"},
+            "status": {"type": "string"},
+            "products": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "is_active": {"type": "boolean"}
+                    }
+                }
+            }
+        }
+    }}
+)
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def shop_report(request, shop_id):
@@ -109,12 +243,45 @@ def shop_report(request, shop_id):
     })
 
 
-# 7. User activity report (writes to file)
+@extend_schema(
+    description="""
+Generates a full user activity and authentication report, including their token, cookies, user-agent, and more.
+
+The data is written to a file in `/tmp/reports/{username}_full_auth.json` for offline auditing.
+
+⚠️ WARNING: This endpoint includes sensitive user information and writes files to disk. Intended for internal use only.
+""",
+    responses={200: {
+        "type": "object",
+        "properties": {
+            "username": {"type": "string"},
+            "email": {"type": "string"},
+            "last_login": {"type": "string"},
+            "is_staff": {"type": "boolean"},
+            "has_token": {"type": "boolean"},
+            "token": {"type": "string"},
+            "cookies": {
+                "type": "object",
+                "properties": {
+                    "csrftoken": {"type": "string"},
+                    "sessionid": {"type": "string"},
+                }
+            },
+            "user_agent": {"type": "string"},
+            "timestamp": {"type": "string"},
+        }
+    }}
+)
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def generate_user_report(request, username):
+def generate_auth_report(request, username):
     user = get_object_or_404(User, username=username)
     token = Token.objects.filter(user=user).first()
+
+    cookies = {
+        "csrftoken": request.COOKIES.get("csrftoken"),
+        "sessionid": request.COOKIES.get("sessionid")
+    }
 
     report = {
         "username": user.username,
@@ -123,12 +290,13 @@ def generate_user_report(request, username):
         "is_staff": user.is_staff,
         "has_token": bool(token),
         "token": token.key if token else None,
+        "cookies": cookies,
         "user_agent": request.META.get("HTTP_USER_AGENT", ""),
         "timestamp": datetime.utcnow().isoformat()
     }
 
     os.makedirs("/tmp/reports", exist_ok=True)
-    with open(f"/tmp/reports/{username}_report.json", "w") as f:
+    with open(f"/tmp/reports/{username}_full_auth.json", "w") as f:
         json.dump(report, f, indent=2)
 
     return JsonResponse(report)
