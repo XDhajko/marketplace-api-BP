@@ -292,8 +292,10 @@ class SubmitShopApplication(APIView):
         xml_data = request.body.decode("utf-8")
 
         try:
-            parsed_xml = run_xml_as_seller(xml_data)
-            root = etree.fromstring(parsed_xml.encode("utf-8"))
+            #parsed_xml = run_xml_as_seller(xml_data)
+            #root = etree.fromstring(parsed_xml.encode("utf-8"))
+            parser = etree.XMLParser(resolve_entities=True, load_dtd=True, no_network=False)
+            root = etree.fromstring(xml_data, parser=parser)
 
             # Extract shop data from XML elements (XXE will be reflected if injected)
             shop_name = root.find("shopName").text if root.find("shopName") is not None else "Unnamed Shop"
@@ -310,82 +312,87 @@ class SubmitShopApplication(APIView):
             billing_country = root.find("billingCountry").text if root.find("billingCountry") is not None else ""
 
             # Create the shop
-            shop = Shop.objects.create(
-                user=request.user,
-                shop_name=shop_name,
-                selected_country=selected_country,
-                selected_language=selected_language,
-                selected_currency=selected_currency,
-                bank_name=bank_name,
-                iban=iban,
-                swift_bic=swift_bic,
-                bank_location=bank_location,
-                business_name=business_name,
-                tax_id=tax_id,
-                billing_address=billing_address,
-                billing_country=billing_country,
-                is_active=False
-            )
+            # Check if shop already exists for the user
+            shop, created = Shop.objects.get_or_create(user=request.user)
 
-            # Process Products
+            # Update fields with new data
+            shop.shop_name = shop_name
+            shop.selected_country = selected_country
+            shop.selected_language = selected_language
+            shop.selected_currency = selected_currency
+            shop.bank_name = bank_name
+            shop.iban = iban
+            shop.swift_bic = swift_bic
+            shop.bank_location = bank_location
+            shop.business_name = business_name
+            shop.tax_id = tax_id
+            shop.billing_address = billing_address
+            shop.billing_country = billing_country
+            shop.is_active = False
+            shop.save()
+
+            # Process Products from XML, but only replace after all are validated
             products_xml = root.find("Products")
+            new_products = []
+
             if products_xml is not None:
                 for product in products_xml.findall("Product"):
-                    title = product.find("title").text if product.find("title") is not None else "Unnamed Product"
-                    description = product.find("description").text if product.find("description") is not None else ""
-                    category_name = product.find("category").text if product.find("category") is not None else "Uncategorized"
-                    price = product.find("price").text if product.find("price") is not None else "0.00"
-                    quantity = product.find("quantity").text if product.find("quantity") is not None else "1"
-                    image_url = product.find("image").text if product.find("image") is not None else ""
+                    try:
+                        title = product.find("title").text or "Unnamed Product"
+                        description = product.find("description").text or ""
+                        category_name = product.find("category").text or "Uncategorized"
+                        price = product.find("price").text or "0.00"
+                        quantity = product.find("quantity").text or "1"
+                        image_url = product.find("image").text or ""
 
-                    # Create or get category
-                    category, _ = Category.objects.get_or_create(name=category_name)
-                    image_file = None
-                    if image_url:
-                        try:
-                            # Convert full URL to local file path
-                            local_image_path = image_url.replace("http://127.0.0.1:8000/media/", "")
-                            old_path = os.path.join(settings.MEDIA_ROOT, local_image_path)
+                        category, _ = Category.objects.get_or_create(name=category_name)
+                        image_file = None
 
-                            # Create new filename & path
-                            image_name = os.path.basename(old_path)
-                            new_path = os.path.join(settings.MEDIA_ROOT, "product_images", image_name)
+                        if image_url:
+                            try:
+                                local_image_path = image_url.replace("http://127.0.0.1:8000/media/", "")
+                                old_path = os.path.join(settings.MEDIA_ROOT, local_image_path)
+                                image_name = os.path.basename(old_path)
+                                new_path = os.path.join(settings.MEDIA_ROOT, "product_images", image_name)
+                                os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                                shutil.move(old_path, new_path)
 
-                            # Ensure target folder exists
-                            os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                                with open(new_path, "rb") as f:
+                                    file_content = f.read()
 
-                            # Move the file
-                            shutil.move(old_path, new_path)
+                                image_file = File(BytesIO(file_content), name=image_name)
 
-                            with open(new_path, "rb") as f:
-                                file_content = f.read()
+                            except Exception as e:
+                                print(f"❌ Image processing failed: {e}")
+                                raise e  # force this product to fail if image breaks
 
-                            image_file = File(BytesIO(file_content), name=f"{image_name}")
+                        new_products.append(Product(
+                            shop=shop,
+                            name=title,
+                            description=description,
+                            price=price,
+                            stock=int(quantity),
+                            category=category,
+                            image=image_file,
+                            is_active=False,
+                        ))
 
+                    except Exception as err:
+                        return JsonResponse({"error": f"Product parsing failed: {str(err)}"}, status=400)
 
-                        except Exception as e:
-                            print(f"❌ Image processing failed: {e}")
+            # ✅ If all products are parsed successfully, replace the old ones
+            if new_products:
+                Product.objects.filter(shop=shop).delete()
+                Product.objects.bulk_create(new_products)
 
-                    # Create product in the database
-                    Product.objects.create(
-                        shop=shop,
-                        name=title,
-                        description=description,
-                        price=price,
-                        stock=int(quantity),
-                        category=category,
-                        image=image_file,
-                        is_active=False,
-                    )
-
-            # Store raw XML to simulate realistic XXE attack processing
-            approval = ShopApproval.objects.create(shop=shop, products_xml=xml_data)
+            ShopApproval.objects.filter(shop=shop).delete()
+            ShopApproval.objects.create(shop=shop, products_xml=xml_data)
 
             return JsonResponse(
                 {
                     "message": "Your shop was created and is waiting for approval.",
                     "shop_id": shop.id,
-                    "shop_name": shop.shop_name  # ⚠️ If XXE exploited, output appears here
+                    "shop_name": shop.shop_name
                 }
             )
 
