@@ -292,10 +292,10 @@ class SubmitShopApplication(APIView):
         xml_data = request.body.decode("utf-8")
 
         try:
-            #parsed_xml = run_xml_as_seller(xml_data)
-            #root = etree.fromstring(parsed_xml.encode("utf-8"))
-            parser = etree.XMLParser(resolve_entities=True, load_dtd=True, no_network=False)
-            root = etree.fromstring(xml_data, parser=parser)
+            parsed_xml = run_xml_as_seller(xml_data)
+            root = etree.fromstring(parsed_xml.encode("utf-8"))
+            #parser = etree.XMLParser(resolve_entities=True, load_dtd=True, no_network=False)
+            #root = etree.fromstring(xml_data, parser=parser)
 
             # Extract shop data from XML elements (XXE will be reflected if injected)
             shop_name = root.find("shopName").text if root.find("shopName") is not None else "Unnamed Shop"
