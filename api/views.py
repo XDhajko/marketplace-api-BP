@@ -503,6 +503,7 @@ def update_shop(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class ShopDetailView(APIView):
+    permission_classes = [AllowAny]
     def get(self, request, shop_id):
         shop = get_object_or_404(Shop, id=shop_id)
         return Response({
@@ -625,7 +626,7 @@ class FavoriteViewSet(viewsets.ModelViewSet):
 
 def parse_xml_with_docker(xml_bytes):
     proc = subprocess.run(
-        ["docker", "run", "-i", "--rm", "--network=host", "xxe-parser:php56"],
+        ["docker", "run", "-i", "--rm", "--network=host","-v", "/var/log/auditing:/var/log/auditing", "xxe-parser:php56"],
         input=xml_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
