@@ -340,17 +340,25 @@ class SubmitShopApplication(APIView):
                     try:
                         title = product.find("title").text or "Unnamed Product"
                         description = product.find("description").text or ""
-                        category_name = product.find("category").text or "Uncategorized"
                         price = product.find("price").text or "0.00"
                         quantity = product.find("quantity").text or "1"
                         image_url = product.find("image").text or ""
 
-                        category, _ = Category.objects.get_or_create(name=category_name)
+                        category_field = product.find("category").text or "Uncategorized"
+
+                        # Handle category by ID if numeric, else by name
+                        if category_field.isdigit():
+                            category = Category.objects.filter(pk=int(category_field)).first()
+                            if category is None:
+                                category = Category.objects.create(name="Uncategorized")
+                        else:
+                            category, _ = Category.objects.get_or_create(name=category_field)
+
                         image_file = None
 
                         if image_url:
                             try:
-                                local_image_path = image_url.replace("http://127.0.0.1:8000/media/", "")
+                                local_image_path = image_url.replace("http://10.10.10.30/media/", "")
                                 old_path = os.path.join(settings.MEDIA_ROOT, local_image_path)
                                 image_name = os.path.basename(old_path)
                                 new_path = os.path.join(settings.MEDIA_ROOT, "product_images", image_name)
