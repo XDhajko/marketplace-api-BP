@@ -5,9 +5,7 @@ from .models import Category
 from .views import (
     UserViewSet, ProductViewSet, OrderViewSet, CategoryViewSet, upload_image, SubmitShopApplication, RegisterView, LoginView, LogoutView, MyShopView,
     update_shop, delete_shop_picture, ShopDetailView, ShopReviewsAPI, CartViewSet,
-    FavoriteViewSet, confirm_shipping, delete_shipping_confirmation, upload_profile_picture,
-    login_admin_via_token
-
+    FavoriteViewSet, confirm_shipping, delete_shipping_confirmation, upload_profile_picture
 )
 
 # 🌍 Create a router to auto-generate routes for viewsets
@@ -34,5 +32,4 @@ urlpatterns = [
     path("orders/<int:order_id>/confirm_shipping/", confirm_shipping, name="confirm_shipping"),
     path("orders/<int:order_id>/shipping_confirmation/", delete_shipping_confirmation, name="delete_shipping_confirmation"),
     path("shop/upload_picture/", upload_profile_picture, name="upload_profile_picture"),
-    path("admin/login_via_token/", login_admin_via_token, name="login_admin_via_token"),
 ]

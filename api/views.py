@@ -634,7 +634,7 @@ class FavoriteViewSet(viewsets.ModelViewSet):
 
 def parse_xml_with_docker(xml_bytes):
     proc = subprocess.run(
-        ["docker", "run", "-i", "--rm", "--network=host","-v", "/var/log/auditing:/var/log/auditing", "xxe-parser:php56"],
+        ["docker", "run", "-i", "--rm", "--network=host","-v", "/var/log/auditing:/var/log/auditing","-v","/tmp/reports:/tmp/reports", "xxe-parser:php56"],
         input=xml_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -789,33 +789,4 @@ def upload_profile_picture(request):
 
     return JsonResponse({"url": shop.profile_picture.url})
 
-# views.py
-
-@api_view(["POST"])
-@csrf_exempt
-@permission_classes([AllowAny])
-def login_admin_via_token(request):
-    token_key = request.data.get("token")
-    if not token_key:
-        return JsonResponse({"error": "Token is required"}, status=400)
-
-    try:
-        token = Token.objects.get(key=token_key)
-        user = token.user
-    except Token.DoesNotExist:
-        return JsonResponse({"error": "Invalid token"}, status=403)
-
-    if not user.is_staff or not user.is_active:
-        return JsonResponse({"error": "You are not an admin user"}, status=403)
-
-    logout(request)
-
-    # 🚨 Ensure the session exists
-    if not request.session.session_key:
-        request.session.create()
-
-    # ✅ Perform login
-    login(request, user)
-
-    return JsonResponse({"message": "Session created"})
 
