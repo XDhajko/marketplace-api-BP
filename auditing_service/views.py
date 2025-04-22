@@ -1,3 +1,4 @@
+from django.contrib.sessions.models import Session
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
@@ -6,6 +7,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.authtoken.models import Token
 from drf_spectacular.utils import extend_schema
 from api.models import Shop, ShopApproval, Product
+from django.utils.timezone import now
 from datetime import datetime
 import os
 import json
@@ -103,57 +105,6 @@ def reject_shop(request, shop_id):
     log_shop_action(approval.shop.shop_name, "rejected", performed_by)
 
     return JsonResponse({"message": f"Shop '{approval.shop.shop_name}' rejected."})
-
-
-
-@extend_schema(
-    description="""
-Retrieve detailed user session information.
-
-This endpoint is used for auditing and debugging purposes. It returns the user’s email, staff status, token (if exists), last login, and active status. It also includes authentication-related cookie values from the request.
-
-⚠️ WARNING: This exposes sensitive authentication info such as tokens and session cookies. Should not be publicly accessible in production.
-""",
-    responses={200: {
-        "type": "object",
-        "properties": {
-            "username": {"type": "string"},
-            "email": {"type": "string"},
-            "is_staff": {"type": "boolean"},
-            "is_active": {"type": "boolean"},
-            "last_login": {"type": "string"},
-            "token": {"type": "string"},
-            "cookies": {
-                "type": "object",
-                "properties": {
-                    "csrftoken": {"type": "string"},
-                    "sessionid": {"type": "string"},
-                }
-            }
-        }
-    }}
-)
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def user_report(request, username):
-    user = get_object_or_404(User, username=username)
-    token = Token.objects.filter(user=user).first()
-
-    cookies = {
-        "csrftoken": request.COOKIES.get("csrftoken"),
-        "sessionid": request.COOKIES.get("sessionid")
-    }
-
-    return JsonResponse({
-        "username": user.username,
-        "email": user.email,
-        "is_staff": user.is_staff,
-        "is_active": user.is_active,
-        "cookies": cookies,
-        "last_login": user.last_login.isoformat() if user.last_login else None,
-        "token": token.key if token else None
-    })
-
 
 @extend_schema(
     description="Returns a count of shops grouped by their approval status (approved, pending, rejected).",
@@ -278,9 +229,17 @@ def generate_auth_report(request, username):
     user = get_object_or_404(User, username=username)
     token = Token.objects.filter(user=user).first()
 
+    # Look for active session for the user
+    session_key = None
+    for session in Session.objects.filter(expire_date__gt=now()):
+        data = session.get_decoded()
+        if data.get('_auth_user_id') == str(user.id):  # session values are strings
+            session_key = session.session_key
+            break
+
     cookies = {
-        "csrftoken": request.COOKIES.get("csrftoken"),
-        "sessionid": request.COOKIES.get("sessionid")
+        "csrftoken": None,  # CSRF is not stored unless part of session payload
+        "sessionid": session_key
     }
 
     report = {
