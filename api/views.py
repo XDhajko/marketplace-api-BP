@@ -6,22 +6,21 @@ from datetime import datetime
 from PIL import Image
 from io import BytesIO
 from django.views.decorators.csrf import csrf_exempt
-from drf_spectacular.openapi import AutoSchema
 from rest_framework.authtoken.models import Token
-from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import update_last_login
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import default_storage
 from django.http import JsonResponse
 from django.utils.decorators import method_decorator
 from rest_framework import viewsets, status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, permission_classes, schema
-from rest_framework.permissions import IsAuthenticated, AllowAny, IsAuthenticatedOrReadOnly
+from rest_framework.permissions import IsAuthenticated, AllowAny, IsAuthenticatedOrReadOnly, IsAdminUser
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from rest_framework.views import APIView
-
+from .permissions import IsShopOwnerOrReadOnly, IsOrderFromUserShop
 
 from .models import Product, Order, OrderItem, Category, ShopApproval, Shop, ShopReview, Cart, CartItem, Favorite, \
     ShippingConfirmation
@@ -47,7 +46,7 @@ class UserViewSet(viewsets.ModelViewSet):
     """
     queryset = User.objects.all()
     serializer_class = UserSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAdminUser]
 
     @action(detail=False, methods=["post"], permission_classes=[IsAuthenticated])
     def change_password(self, request):
@@ -70,71 +69,45 @@ class CategoryViewSet(viewsets.ModelViewSet):
     """
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
-    permission_classes = [AllowAny]
+
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            self.permission_classes = [IsAdminUser]
+        return super().get_permissions()
 
 
 
 class ProductViewSet(viewsets.ModelViewSet):
-    """
-    Allows approved suppliers to manage their products.
-    Customers can view all available products.
-    """
     queryset = Product.objects.all()
     serializer_class = ProductSerializer
-    permission_classes = [AllowAny]  # Anyone can view products
+    permission_classes = [IsShopOwnerOrReadOnly]
 
-    @action(detail=False, methods=["get"])
-    def my_shop(self, request):
-        """Alternative way: Explicit /products/my_shop/ endpoint"""
-        user = request.user
-        if not hasattr(user, 'shop'):
-            return Response({"error": "User does not own a shop"}, status=400)
+    def perform_create(self, serializer):
+        serializer.save(shop=self.request.user.shop)
 
-        products = Product.objects.filter(shop=user.shop)
-        serializer = ProductSerializer(products, many=True)
-        return Response(serializer.data)
+    def perform_update(self, serializer):
+        product = self.get_object()
+        if product.shop.user != self.request.user:
+            raise PermissionDenied("You cannot edit products from other shops.")
+        serializer.save()
 
-    def create(self, request, *args, **kwargs):
-        user = request.user
-        if not hasattr(user, "shop"):
-            return Response({"error": "Only shop owners can add products."}, status=status.HTTP_403_FORBIDDEN)
-
-        request.data["shop"] = user.shop.id  # Assign product to the shop
-        return super().create(request, *args, **kwargs)
-
-    def update(self, request, *args, **kwargs):
-        user = request.user
-        instance = self.get_object()
-
-        if instance.shop.user != user:
-            return Response({"error": "You can only edit your own products."}, status=403)
-
-        # ✅ Track old image path before updating
-        old_image_path = instance.image.path if instance.image else None
-
-        response = super().update(request, *args, **kwargs)
-
-        # ✅ Compare and delete if image was replaced
+        old_image_path = product.image.path if product.image else None
         if old_image_path and os.path.exists(old_image_path):
             updated_instance = self.get_object()
-            if updated_instance.image and updated_instance.image.path != old_image_path:
+            if updated_instance.image.path != old_image_path:
                 try:
                     os.remove(old_image_path)
-                    print(f"Deleted old image: {old_image_path}")
                 except Exception as e:
                     print(f"Could not delete old image: {e}")
 
-        return response
+    def perform_destroy(self, instance):
+        if instance.shop.user != self.request.user:
+            raise PermissionDenied("You cannot delete products from other shops.")
+        instance.delete()
 
-    def destroy(self, request, *args, **kwargs):
-        user = request.user
-        instance = self.get_object()
-        if instance.shop.user != user:
-            return Response({"error": "You can only delete your own products."}, status=status.HTTP_403_FORBIDDEN)
-
-        return super().destroy(request, *args, **kwargs)
-
-    @action(detail=False, methods=["get"], permission_classes=[AllowAny])
+    @action(detail=False, methods=["get"], permission_classes=[IsAuthenticatedOrReadOnly])
     def live_search(self, request):
         query = request.query_params.get("q", "")
         products = Product.objects.filter(name__icontains=query)[:6]
@@ -148,14 +121,18 @@ class ProductViewSet(viewsets.ModelViewSet):
             "categories": category_data
         })
 
+    @action(detail=False, methods=["get"], permission_classes=[IsShopOwnerOrReadOnly])
+    def my_shop(self, request):
+        if not hasattr(request.user, 'shop'):
+            raise PermissionDenied("You do not own a shop.")
+        products = Product.objects.filter(shop=request.user.shop)
+        serializer = ProductSerializer(products, many=True)
+        return Response(serializer.data)
 
-# ------------------------------
-# 6️⃣ ORDERING SYSTEM
-# ------------------------------
+
 class OrderViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     queryset = Order.objects.all()
-    serializer_class = OrderSerializer()
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -163,11 +140,9 @@ class OrderViewSet(viewsets.ModelViewSet):
         return OrderSerializer
 
     def get_queryset(self):
-        # Return only orders for the authenticated user
-        return Order.objects.filter(user=self.request.user).order_by("-created_at")
+        return Order.objects.filter(user=self.request.user)
 
     def create(self, request, *args, **kwargs):
-        user = request.user
         data = request.data
         items = data.pop("items", [])
 
@@ -175,7 +150,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             return Response({"error": "No items provided"}, status=status.HTTP_400_BAD_REQUEST)
 
         order = Order.objects.create(
-            user=user,
+            user=request.user,
             full_name=data.get("full_name"),
             shipping_address=data.get("shipping_address"),
             shipping_city=data.get("shipping_city"),
@@ -184,7 +159,7 @@ class OrderViewSet(viewsets.ModelViewSet):
             phone_number=data.get("phone_number"),
             payment_method=data.get("payment_method"),
             status="pending",
-            total_price=0  # will be calculated below
+            total_price=0
         )
 
         total_price = 0
@@ -199,44 +174,27 @@ class OrderViewSet(viewsets.ModelViewSet):
                 return Response({"error": f"Product with id {product_id} not found."}, status=400)
 
             price = product.price * (1 - product.discount)
-            OrderItem.objects.create(
-                order=order,
-                product=product,
-                quantity=quantity,
-                price=price
-            )
+            OrderItem.objects.create(order=order, product=product, quantity=quantity, price=price)
             total_price += price * quantity
 
         order.total_price = total_price
         order.save()
 
-        # Clear user's cart after order is placed
-        CartItem.objects.filter(cart__user=user).delete()
+        CartItem.objects.filter(cart__user=request.user).delete()
 
         serializer = OrderSerializer(order)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["get"], permission_classes=[IsAuthenticated])
     def my_shop_orders(self, request):
-        if not hasattr(request.user, "shop"):
-            return Response({"error": "You don’t own a shop."}, status=403)
-
         shop = request.user.shop
-        # Orders where at least one item is from this shop
         orders = Order.objects.filter(items__product__shop=shop).distinct()
         serializer = OrderSerializer(orders, many=True, context={"request": request})
         return Response(serializer.data)
 
-    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsOrderFromUserShop])
     def update_status(self, request, pk=None):
-        try:
-            order = Order.objects.get(pk=pk)
-        except Order.DoesNotExist:
-            return Response({"error": "Order not found."}, status=404)
-
-        # ✅ Make sure the order has at least 1 item from the shop
-        if not hasattr(request.user, "shop") or not order.items.filter(product__shop=request.user.shop).exists():
-            return Response({"error": "You are not allowed to update this order."}, status=403)
+        order = self.get_object()
 
         new_status = request.data.get("status")
         if new_status not in ["pending", "shipped", "delivered", "cancelled"]:
@@ -253,6 +211,8 @@ class OrderViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 @csrf_exempt
 def upload_image(request):
     if request.method == 'POST' and request.FILES.get('image'):
