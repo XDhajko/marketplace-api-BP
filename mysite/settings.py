@@ -95,8 +95,8 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
 # Allow CORS for all methods (GET, POST, PUT, DELETE, etc.)
 CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"]
 
+ROOT_URLCONF = os.getenv("DJANGO_ROOT_URLCONF", "mysite.urls")
 
-ROOT_URLCONF = 'mysite.urls'
 
 TEMPLATES = [
     {
